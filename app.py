@@ -1,4 +1,8 @@
 # app.py
+import os
+os.environ["STREAMLIT_SERVER_HEADLESS"] = "true"
+os.environ["STREAMLIT_SERVER_ENABLECORS"] = "false"
+os.environ["STREAMLIT_SERVER_ENABLEXSCRFPROTECTION"] = "false"
 import streamlit as st
 import yfinance as yf
 import pandas as pd
