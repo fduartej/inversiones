@@ -17,6 +17,34 @@ st.title("📈 Dashboard de Portafolio de Inversión")
 st.sidebar.title("📌 Parámetros del Portafolio")
 tickers_input = st.sidebar.text_area("Tickers (separados por coma)", "IVV,KO,LQD,NVDA,TIP,TLT,META,SMR,QQQ,BND,JPM,AVGO,IYY,AGG")
 tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+default_weight = round(1 / len(tickers), 4)
+
+
+st.sidebar.markdown("📅 Opcional: Historial de Dividendos")
+
+show_dividends = st.sidebar.checkbox("📥 Mostrar calendario histórico de dividendos por activo", value=False)
+
+
+st.sidebar.markdown("### 🧮 Asignación de pesos (%)")
+weights = []
+for t in tickers:
+    w = st.sidebar.number_input(f"Peso {t}", min_value=0.0, max_value=1.0, value=default_weight, step=0.01)
+    weights.append(w)
+
+# Validación
+if abs(sum(weights) - 1.0) > 0.01:
+    st.sidebar.error("❌ Los pesos deben sumar 1. Ajusta los valores.")
+    st.stop()
+
+# Monto total invertido
+total_investment = st.sidebar.number_input("💰 Monto total invertido (USD)", min_value=1000.0, value=10000.0, step=100.0)
+weights_np = np.array(weights)
+
+st.subheader("📊 Distribución del Portafolio (Pesos)")
+fig, ax = plt.subplots()
+ax.pie(weights, labels=tickers, autopct="%1.1f%%", startangle=90)
+ax.axis("equal")
+st.pyplot(fig)
 
 # Sidebar: selección de período
 st.sidebar.markdown("### ⏱️ Rango de tiempo")
@@ -34,20 +62,95 @@ if st.sidebar.button("🔄 Actualizar análisis"):
         # Descargar precios ajustados según período elegido
         data = yf.download(tickers, period=period)["Close"]
         returns = data.pct_change().dropna()
+        portfolio_returns = returns.dot(weights_np)
+        
+        # Benchmark: SPY
+        benchmark_ticker = "SPY"
+        benchmark_data = yf.download(benchmark_ticker, period=period)["Close"]
+        benchmark_returns = benchmark_data.pct_change().dropna()
+
+        # Alinear fechas
+        combined = pd.concat([portfolio_returns, benchmark_returns], axis=1).dropna()
+        combined.columns = ['Portafolio', 'Benchmark']
+
+        # Regresión lineal para Alpha y Beta
+        from sklearn.linear_model import LinearRegression
+
+        X = combined['Benchmark'].values.reshape(-1, 1)
+        y = combined['Portafolio'].values
+
+        model = LinearRegression().fit(X, y)
+        beta = model.coef_[0]
+        alpha = model.intercept_ * 252  # anualizado
+        r_squared = model.score(X, y)
+        
+        st.subheader("📌 Comparación con Benchmark (SPY)")
+        st.metric("📈 Beta", f"{beta:.2f}")
+        st.metric("📊 Alpha anualizado", f"{alpha:.2%}")
+        st.metric("📐 R² (Explicación)", f"{r_squared:.2%}")
+
+        st.info("""
+        - **Beta** > 1: más volátil que el mercado.  
+        - **Alpha** positivo: generas retorno por encima del mercado.  
+        - **R²**: qué tan bien tus movimientos siguen al benchmark.
+        """)
+                
+                
+        st.subheader("📈 Evolución acumulada: Portafolio vs SPY")
+
+        cumulative_returns = (1 + combined).cumprod()
+        fig, ax = plt.subplots(figsize=(12,6))
+        cumulative_returns.plot(ax=ax, linewidth=2)
+        plt.title("Portafolio vs. Benchmark (SPY)")
+        plt.grid(True)
+        st.pyplot(fig)
+        
+        # Rolling Sharpe Ratio (90 días)
+        window_days = 90
+        rolling_return = returns.dot(weights_np).rolling(window=window_days).mean()
+        rolling_volatility = returns.dot(weights_np).rolling(window=window_days).std()
+        rolling_sharpe = (rolling_return / rolling_volatility) * np.sqrt(252)
 
         # Calcular métricas una sola vez
         annual_return = returns.mean() * 252 * 100
         annual_volatility = returns.std() * (252 ** 0.5) * 100
         
         # Asignar pesos iguales por defecto si no hay pesos definidos
-        n = len(annual_return)
-        weights = [1/n] * n  # o personaliza con tus propios pesos
-
-        # Calcular retorno esperado del portafolio (ponderado)
-        retorno_esperado = sum(w * r for w, r in zip(weights, annual_return))
+        retorno_esperado = np.dot(weights_np, annual_return / 100) * 100  # expresado en porcentaje
+        cov_matrix = returns.cov() * 252
+        portfolio_volatility = np.sqrt(weights_np @ cov_matrix.values @ weights_np.T)
 
         st.subheader("📐 Retorno Esperado del Portafolio")
         st.metric("Rentabilidad Anual Esperada", f"{retorno_esperado:.2f}%")
+        ganancia_esperada = total_investment * retorno_esperado / 100
+        st.metric("📈 Ganancia Estimada (1 año)", f"${ganancia_esperada:,.2f}")
+        
+        # Parámetros (puedes ajustarlos)
+        tasa_impuesto = 0.05
+        tasa_comision = 0.005  # 0.5%
+
+        # Cálculos
+        impuesto = ganancia_esperada * tasa_impuesto
+        comision = total_investment * tasa_comision
+        ganancia_neta = ganancia_esperada - impuesto - comision
+
+        # Mostrar en Streamlit
+        st.markdown("### 💸 Ajustes por Impuestos y Comisiones (Perú)")
+
+        st.write(f"**🧾 Impuesto a la ganancia de capital (5%)**: ${impuesto:,.2f}")
+        st.write(f"**💼 Comisión estimada (0.5%)**: ${comision:,.2f}")
+        st.success(f"**✅ Ganancia neta esperada**: ${ganancia_neta:,.2f}")
+        
+        st.subheader("📈 Sharpe Ratio Móvil (90 días)")
+        fig, ax = plt.subplots(figsize=(12, 5))
+        rolling_sharpe.plot(ax=ax, color='purple')
+        ax.axhline(0, linestyle='--', color='gray', linewidth=1)
+        ax.set_title("Sharpe Ratio Móvil del Portafolio")
+        ax.set_ylabel("Sharpe")
+        ax.grid(True)
+        st.pyplot(fig)
+        
+
 
         # Generar resumen de cada ticker
         summary = []
@@ -156,6 +259,17 @@ Estos indicadores te ayudan a evaluar si tu portafolio es robusto, balanceado y 
         ax.grid(True)
         ax.legend()
         st.pyplot(fig)
+        
+        st.subheader("💵 Valor Acumulado del Portafolio (USD reales)")
+
+        valor_inversion_acumulado = cumulative.dot(weights_np) * total_investment
+        fig2, ax2 = plt.subplots(figsize=(12, 6))
+        valor_inversion_acumulado.plot(ax=ax2, linewidth=2, color='green', label="Valor Portafolio (USD)")
+        ax2.set_title("💰 Evolución del Valor Total del Portafolio")
+        ax2.set_ylabel("USD")
+        ax2.grid(True)
+        ax2.legend()
+        st.pyplot(fig2)
 
         st.subheader("📉 Rentabilidad vs. Volatilidad (Risk-Return Plot)")
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -173,3 +287,125 @@ Estos indicadores te ayudan a evaluar si tu portafolio es robusto, balanceado y 
         ax.set_title("Rentabilidad vs. Volatilidad")
         ax.grid(True)
         st.pyplot(fig)
+        
+        # ==============================
+        # 📉 Cálculo del Drawdown
+        # ==============================
+
+        st.subheader("📉 Drawdown del Portafolio (Caída desde el Máximo)")
+
+        # Índice de riqueza (rendimiento acumulado)
+        wealth_index = (1 + returns.dot(weights_np)).cumprod()
+
+        # Máximos anteriores
+        previous_peaks = wealth_index.cummax()
+
+        # Drawdown en %
+        drawdown = (wealth_index - previous_peaks) / previous_peaks
+
+        # Gráfico
+        fig_dd, ax_dd = plt.subplots(figsize=(12, 4))
+        drawdown.plot(ax=ax_dd, color='crimson')
+        ax_dd.set_title("Drawdown del Portafolio")
+        ax_dd.set_ylabel("Drawdown (%)")
+        ax_dd.grid(True)
+        st.pyplot(fig_dd)
+
+        # ==============================
+        # ⚖️ Sortino Ratio
+        # ==============================
+
+        # Retornos negativos (downside)
+        negative_returns = portfolio_returns[portfolio_returns < 0]
+
+        # Desviación estándar de las pérdidas
+        downside_std = negative_returns.std()
+
+        # Rentabilidad media anualizada
+        mean_return = portfolio_returns.mean() * 252
+
+        # Sortino Ratio
+        sortino_ratio = mean_return / downside_std if downside_std != 0 else np.nan
+
+        # Mostrar en la app
+        st.subheader("⚖️ Sortino Ratio – Riesgo Ajustado a Caídas")
+        st.metric("Sortino Ratio", f"{sortino_ratio:.2f}")
+
+        # Interpretación automática
+        if sortino_ratio >= 1.5:
+            color = "🟢"
+            interpret = "Excelente relación rentabilidad / riesgo negativo."
+        elif sortino_ratio >= 1.0:
+            color = "🟡"
+            interpret = "Aceptable. El portafolio maneja bien el riesgo bajista."
+        else:
+            color = "🔴"
+            interpret = "Riesgo alto en las caídas. Revisa diversificación y estabilidad."
+
+        st.info(f"{color} {interpret}")
+
+        st.subheader("📉 Valor en Riesgo (VaR Histórico)")
+
+        # Monto invertido inicial simulado
+        monto_invertido = st.number_input("💵 Monto invertido (USD)", min_value=1000, value=10000, step=1000)
+
+        # VaR diario al 95%
+        var_95 = np.percentile(portfolio_returns, 5)
+        valor_en_riesgo = -var_95 * monto_invertido
+
+        # Mostrar
+        st.metric(label="🔻 VaR Diario al 95%", value=f"${valor_en_riesgo:,.2f}",
+                delta=f"{var_95*100:.2f}%")
+
+        # Interpretación automática
+        st.info("Con 95% de confianza, **no deberías perder más de ese valor en un mal día promedio.**")
+
+
+        st.subheader("🗓️ Retornos Mensuales del Portafolio (Calendar Heatmap)")
+
+        # Retornos mensuales del portafolio
+        monthly_returns = portfolio_returns.resample('M').apply(lambda r: (1 + r).prod() - 1)
+
+        # Convertir a DataFrame Año x Mes
+        monthly_returns_df = monthly_returns.to_frame(name="Retorno")
+        monthly_returns_df["Año"] = monthly_returns_df.index.year
+        monthly_returns_df["Mes"] = monthly_returns_df.index.strftime("%b")
+
+        # Pivot para el heatmap
+        calendar = monthly_returns_df.pivot(index="Año", columns="Mes", values="Retorno")
+
+        # Asegurar orden de meses
+        meses_ordenados = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        calendar = calendar.reindex(columns=[m for m in meses_ordenados if m in calendar.columns])
+
+
+        # Gráfico
+        fig_cal, ax_cal = plt.subplots(figsize=(12, 5))
+        sns.heatmap(calendar * 100, cmap="RdYlGn", center=0, annot=True, fmt=".1f", linewidths=0.5, ax=ax_cal)
+        ax_cal.set_title("Retornos Mensuales del Portafolio (%)")
+        st.pyplot(fig_cal)
+        
+      
+        if show_dividends:
+            for ticker in tickers:
+                try:
+                    t = yf.Ticker(ticker)
+                    dividends = t.dividends
+
+                    if dividends.empty:
+                        st.write(f"📭 {ticker}: No se encontraron dividendos históricos.")
+                        continue
+
+                    dividends.index = dividends.index.date  # fechas legibles
+                    df_div = dividends.rename("Dividendo").to_frame()
+                    df_div.index.name = "Fecha"
+
+                    st.subheader(f"📌 {ticker}")
+                    st.dataframe(df_div.tail(10).style.format({"Dividendo": "${:,.2f}"}))
+                except Exception as e:
+                    st.warning(f"⚠️ {ticker}: Error al obtener dividendos. {e}")
+        else:
+            st.caption("✅ Puedes activar esta opción si deseas ver el historial real de dividendos por activo.")
+
+
